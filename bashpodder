@@ -1,0 +1,331 @@
+#!/bin/bash
+# By Linc 10/1/2004
+# Find the latest script at http://lincgeek.org/bashpodder
+# Revision 1.21 12/04/2008 - Many Contributers!
+# If you use this and have made improvements or have comments
+# drop me an email at linc dot fessenden at gmail dot com
+# and post your changes to the forum at http://lincgeek.org/lincware
+# I'd appreciate it!
+
+# Make script crontab friendly:
+cd $(dirname $0)
+
+sudo mkdir -p /media/usbaudio
+if [ ! -d /media/usbaudio ]; then
+	echo bashpodder: cannot create mount point directory
+	exit 1
+fi
+sudo chmod a+rwx /media/usbaudio
+OPENCMD="cat"
+BLANKSUB="echo"
+if [ ! -d /media/usbaudio/AUDIOBOOKS/ -a ! -d /media/usbaudio/Podcasts/ ]; then
+	#FOUNDUUID=""
+	#for i in F06B-1D93 0123-4567; do
+	#	if sudo PATH=/bin:/usr/bin:/sbin:/usr/sbin mount -o rw,quiet,iocharset=utf8,umask=000,check=s,shortname=mixed -U $i /media/usbaudio; then
+	#		FOUNDUUID=$i
+	#		break
+	#	fi
+	#done
+	#if [ "x$FOUNDUUID" = x ]; then
+	#if [ "x$FOUNDUUID" = x0123-4567 ]; then
+	#	OPENCMD='perl -e @l=<>;print(reverse(@l))'
+	#fi
+	sudo lsblk -i -o name,label | egrep 'SANSA CLIPP|CLIP SPORT' | tail -1 \
+		| tee /tmp/bashpodder.sansa \
+		| sed -e 's,^...............,,' \
+		| tee /tmp/bashpodder.label
+	FUTURE=`date +%s -d "1/1/2032 00:00"`
+	MINS=`date +%s | xargs -i echo '('$FUTURE'-{})/60' | bc | perl -ne 'printf("%07d\n",$_)'`
+	ORIG_MINS=$MINS
+	WEEKDAY=`date +%w`
+	HOUR=`date +%H`
+	if [ $WEEKDAY -eq 6 \
+			-o \( $WEEKDAY -gt 0 \
+				-a \( $HOUR -lt 6 -o $HOUR -gt 9 \) \) \
+			-o \( $WEEKDAY -eq 0 -a $HOUR -lt 18 \) ]; then
+		sed -e 's,^[^a-z]*,/dev/,;s, .*,,' /tmp/bashpodder.sansa \
+			| tee /tmp/bashpodder.device
+		if [ -s /tmp/bashpodder.device ]; then
+			:
+		else
+			sudo lsblk -i -o name,uuid | grep 0123-4567 | tail -1 \
+				| sed -e 's,^[^a-z]*,/dev/,;s, .*,,' \
+				| tee /tmp/bashpodder.device
+		fi
+		date
+		if sudo xargs -r -t -n1 dosfsck -n -v </tmp/bashpodder.device; then
+			xargs -i echo '{}' is peachy </tmp/bashpodder.device
+		else
+			date
+			sudo xargs -r -t -n1 dosfsck -v -w -r -a -t -V \
+				</tmp/bashpodder.device
+		fi
+		date
+	fi
+	MOUNTOPTS="rw,quiet,iocharset=utf8,umask=000,check=s,shortname=mixed,flush"
+	if [ -s /tmp/bashpodder.label ] &&
+	   sudo PATH=/bin:/usr/bin:/sbin:/usr/sbin xargs -t -i mount -o $MOUNTOPTS -L '{}' /media/usbaudio </tmp/bashpodder.label; then
+		xargs -i echo mounted '{}' on /media/usbaudio \
+			</tmp/bashpodder.label
+	else
+		if sudo PATH=/bin:/usr/bin:/sbin:/usr/sbin mount -o $MOUNTOPTS -U 0123-4567 /media/usbaudio; then
+			echo mounted old SANSA CLIP
+		else
+			xargs -i echo bashpodder: unable to mount '{}' \
+				</tmp/bashpodder.label
+			exit 1
+		fi
+	fi
+fi
+
+if [ -e /dev/disk/by-uuid/0123-4567 ]; then
+	OPENCMD='perl -we @l=<>;print(reverse(@l))'
+	BLANKSUB=""
+fi
+
+if [ ! -d /media/usbaudio/AUDIOBOOKS/ -a ! -d /media/usbaudio/Podcasts/ ]; then
+	sudo PATH=/bin:/usr/bin:/sbin:/usr/sbin umount /media/usbaudio
+	echo bashpodder: /media/usbaudio/AUDIOBOOKS/ does not exist
+	exit 1
+fi
+AUDIOBOOKS="/media/usbaudio/AUDIOBOOKS"
+if [ -d /media/usbaudio/Podcasts ]; then
+	AUDIOBOOKS="/media/usbaudio/Podcasts"
+fi
+df -k $AUDIOBOOKS | fgrep /media/usbaudio
+if [ $? -ne 0 ]; then
+	echo bashpodder: mount of MP3 player definitely did not work 1>&2
+	exit 1
+fi
+
+# allow mp4 to be downloaded on the newer device
+FOUR=""
+if grep SPORT /tmp/bashpodder.sansa >/dev/null; then
+	FOUR="4"
+fi
+
+# datadir is the directory you want podcasts saved to:
+#datadir=$(date +%Y-%m-%d)
+datadir="$AUDIOBOOKS"
+
+## create datadir if necessary:
+#mkdir -p $datadir
+
+cat /dev/null > /tmp/bashpodder.log
+
+if [ ! -d /tmp/bashpodder.dummy ]; then
+	/bin/mkdir /tmp/bashpodder.dummy
+fi
+/bin/chmod 0 /tmp/bashpodder.dummy
+
+set -xv
+# Read the bp.conf file and wget any url not already in the podcast.log file:
+($BLANKSUB; $OPENCMD $HOME/.bashpodderrc) \
+   | while read nameurl
+	do
+	if expr "x$nameurl" : 'x *#'>/dev/null; then
+		continue
+	fi
+	if df -k $AUDIOBOOKS 2>/dev/null | fgrep /media/usbaudio
+	then
+		:
+	else
+		continue
+	fi
+	if [ "x$nameurl" = x ]; then
+		name=""
+	else
+		array=( $nameurl )
+		name="${array[0]}"
+		podcast="${array[1]}"
+		echo $name
+		echo $podcast
+		file=$(set -o pipefail;xsltproc bashpodder.parse_enclosure.xsl $podcast || wget -T 30 --no-check-certificate -q $podcast -O - | xsltproc bashpodder.parse_enclosure.xsl - || wget -T 30 --no-check-certificate -q $podcast -O - | tr '\r' '\n' | tr \' \" | sed -n 's/.*url="\([^"]*\)".*/\1/p')
+		if [ ${#file[*]} -eq 0 ]; then
+			continue
+		fi
+	fi
+	if [ -f $HOME/lib/bashpodder/$name.log.gz ]; then
+		guz $HOME/lib/bashpodder/$name.log.gz </dev/null
+	fi
+	[ -f $HOME/lib/bashpodder/$name.log ] \
+		|| touch $HOME/lib/bashpodder/$name.log
+	/bin/rm -f /tmp/bashpodder.tmp
+	/bin/rm -f /tmp/bashpodder.missed.tmp
+	missed=""
+	if [ -f $HOME/lib/bashpodder/$name.missed.log ]; then
+		missed=$(cat $HOME/lib/bashpodder/$name.missed.log)
+	fi
+	RETSTAT=0
+	for url in $file $missed
+		do
+		if [ "x$url" = "x$last" ]; then
+			continue
+		fi
+		last=$url
+		lurl=`echo "$url" | tr '[:upper:]' '[:lower:]'`
+		if expr "$lurl" : '.*/[^.]*$' >/dev/null; then
+			:
+		elif expr "$lurl" : '.*\.\(mp.[^.]*\|m3u\|m4a\|og[gav]\|spx\|wav\|fl[ca]\)$' >/dev/null; then
+			:
+		else
+			continue
+		fi
+		if [ -f /tmp/bashpodder.tmp ] \
+			  && fgrep "$url" /tmp/bashpodder.tmp > /dev/null; then
+			continue
+		fi
+		if fgrep "$url" $HOME/lib/bashpodder/$name.log > /dev/null; then
+			echo "$url" >> /tmp/bashpodder.tmp
+		elif [ $RETSTAT -ne 0 ]; then
+			if [ -f /tmp/bashpodder.missed.tmp ]&&fgrep "$url" /tmp/bashpodder.missed.tmp >/dev/null; then
+				:
+			else
+				echo "$url" >> /tmp/bashpodder.missed.tmp
+			fi
+		else
+			amtleft=`(df -k $AUDIOBOOKS||echo / 0 0 0 0)|awk '/^\//{print $4}'`
+			if [ "$amtleft" -gt 111000 ]; then
+				date
+				ext=`echo "$lurl"|sed -n 's/[^a-zA-Z0-9]*$//;s/^.*\././p'`
+				if expr "$url" : '.*/[^.]*$' >/dev/null; then
+					alterfile=/tmp/bashpodder.mp3
+					/bin/rm -f $alterfile
+				elif expr "$lurl" : '.*\.\(mp[23'$FOUR']\|m3u\|m4a\|og[gav]\|spx\|wav\|fl[ca]\)'>/dev/null; then
+					alterfile=""
+					/bin/mkdir /tmp/bashpodder.tmpdir
+				else
+					alterfile=/tmp/bashpodder$ext
+					/bin/rm -f $alterfile
+				fi
+				#-O "$datadir"/$(echo "$url" | awk -F'/' {'print $NF'} | awk -F'=' {'print $NF'} | awk -F'?' {'print $1'})
+				#wget --no-check-certificate --progress=dot:mega --restrict-file-names=windows -T 10 -t 6 -U BashPodder -c -P "$datadir" "$url"
+				FN=a$MINS$name$ext
+				if expr "$url" : / >/dev/null; then
+					#if [ "$alterfile" ]; then
+					#	#FN=`basename "$url"`
+					#	echo /bin/cp "$url" "$alterfile"
+					#	/bin/cp "$url" "$alterfile"
+					#	RETSTAT=$?
+					#else
+						#echo /bin/cp "$url" "$datadir/"
+						#/bin/cp "$url" "$datadir/"
+						#name=`basename $lurl|sed -e 's,\..*,,'`
+						#FN=a$MINS$name$ext
+						echo /bin/cp "$url" "$datadir/$FN"
+						/bin/cp "$url" "$datadir/$FN"
+						RETSTAT=$?
+					#fi
+				else
+					wgetFN=`wget --no-check-certificate -nv --restrict-file-names=windows -T 30 -U BashPodder -P /tmp/bashpodder.dummy "$url" \
+						2>&1 | sed -n '/: Permission denied/{s,.*/tmp/bashpodder.dummy/,,;s,: Permission denied,,;s,'"'"'.*,,;s,?.*,,;s,@.*,,;p}' \
+						| sed -e 's,.*/\(.\),\1,;s,/,,g' \
+						| tee /tmp/bashpodder.wgetfn \
+						| sed -e 's,\.[^.]*$,,'`
+					ext=`sed -n 's/[^a-zA-Z0-9]*$//;s/^.*\././p' /tmp/bashpodder.wgetfn`
+					#FN=a$MINS$name$ext
+					FN=a$MINS$name"$wgetFN"$ext
+					if [ "$alterfile" ]; then
+						timeout 600 axel -k -o "$alterfile" "$url"
+						RETSTAT=$?
+					else
+						timeout 600 axel -k -o "/tmp/bashpodder.tmpdir/$FN" "$url"
+						RETSTAT=$?
+					fi
+					if [ $RETSTAT -ne 0 ]; then
+						if [ "$alterfile" ]; then
+							wget --no-check-certificate --progress=dot:mega --restrict-file-names=windows -T 30 -U BashPodder -O "$alterfile" "$url"
+							RETSTAT=$?
+						else
+							wget --no-check-certificate --progress=dot:mega --restrict-file-names=windows -T 30 -U BashPodder -c -O "/tmp/bashpodder.tmpdir/$FN" "$url"
+							RETSTAT=$?
+						fi
+					fi
+					if [ $RETSTAT -eq 0 ]; then
+						if [ "x$alterfile" != x ]; then
+							#set -xv
+							origFN=$FN
+							FN=`echo "$origFN" | sed -e 's/\.[^.]*$//g'`.mp3
+							time nice ffmpeg -v error -i "$alterfile" -ac 2 -f wav -max_muxing_queue_size 9999 -metadata album="a$ORIG_MINS" -metadata title="a$MINS$name$wgetFN" - </dev/null \
+							    | lame --disptime 60 --scale 2 --tl "a$ORIG_MINS" --tt "a$MINS$name$wgetFN" --preset standard - "$datadir/$FN"
+							RETSTAT=$?
+							if [ $RETSTAT -ne 0 ]; then
+							    /bin/rm "$datadir/$FN"
+							fi
+							#set +xv
+							unset origFN
+						else
+							for f in /tmp/bashpodder.tmpdir/*; do
+								amtleft=`(df -k $AUDIOBOOKS||echo / 0 0 0 0)|awk '/^\//{print $4}'`
+								if [ "$amtleft" -le 111000 ]; then
+									break
+								fi
+								filename="`basename $f`"
+								time nice ffmpeg -v error -flags2 fast -y -i "$f" -vol 1024 -max_muxing_queue_size 9999 -metadata album="a$ORIG_MINS" -metadata title="a$MINS$name$wgetFN" "$datadir/$filename" </dev/null
+								if [ $? -eq 0 ]; then
+									/bin/rm "$f"
+								else
+									echo bashpodder: ffmpeg failed
+									/bin/mv "$f" "$datadir/$filename"
+									RETSTAT=$?
+								fi
+								if [ $RETSTAT -ne 0 ]; then
+									RETSTAT=2
+									break
+								fi
+							done
+							unset filename
+							/bin/rmdir /tmp/bashpodder.tmpdir
+						fi
+					fi
+				fi
+				if [ $RETSTAT -eq 0 ]; then
+					echo "$url" >> /tmp/bashpodder.tmp
+				elif [ $RETSTAT -eq 1 -o $RETSTAT -eq 3 ]; then
+					if [ -f /tmp/bashpodder.missed.tmp ]&&fgrep "$url" /tmp/bashpodder.missed.tmp >/dev/null; then
+						cat /dev/null
+					else
+						echo "$url" >> /tmp/bashpodder.missed.tmp
+					fi
+				fi
+				df -k $AUDIOBOOKS | fgrep /media/usbaudio
+				MINS=`expr $MINS + 1`
+			else
+				if [ -f /tmp/bashpodder.missed.tmp ]&&fgrep "$url" /tmp/bashpodder.missed.tmp >/dev/null; then
+					:
+				else
+					echo "$url" >> /tmp/bashpodder.missed.tmp
+				fi
+			fi
+		fi
+		done
+	if [ -f /tmp/bashpodder.tmp ]; then
+		if cmp -s $HOME/lib/bashpodder/$name.log /tmp/bashpodder.tmp; then
+			rm /tmp/bashpodder.tmp
+		else
+			rm $HOME/lib/bashpodder/$name.log
+			sort -u -o $HOME/lib/bashpodder/$name.log /tmp/bashpodder.tmp
+		fi
+	fi
+	if [ -f /tmp/bashpodder.missed.tmp ]; then
+		if [ -f $HOME/lib/bashpodder/$name.missed.log ]; then
+			sort -o /tmp/bashpodder.missed.sorted /tmp/bashpodder.missed.tmp
+			sort -o /tmp/bashpodder.missed.old.sorted $HOME/lib/bashpodder/$name.missed.log
+			if cmp -s /tmp/bashpodder.missed.old.sorted /tmp/bashpodder.missed.sorted; then
+				rm /tmp/bashpodder.missed.tmp
+			else
+				rm $HOME/lib/bashpodder/$name.missed.log
+				/bin/mv /tmp/bashpodder.missed.tmp $HOME/lib/bashpodder/$name.missed.log
+			fi
+			/bin/rm /tmp/bashpodder.missed.old.sorted
+			/bin/rm /tmp/bashpodder.missed.sorted
+		else
+			/bin/mv /tmp/bashpodder.missed.tmp $HOME/lib/bashpodder/$name.missed.log
+		fi
+	elif [ -f $HOME/lib/bashpodder/$name.missed.log ]; then
+		rm $HOME/lib/bashpodder/$name.missed.log
+	fi
+	done
+sudo PATH=/bin:/usr/bin:/sbin:/usr/sbin umount /media/usbaudio
+# Create an m3u playlist:
+#ls $datadir | grep -v m3u > $datadir/podcast.m3u
